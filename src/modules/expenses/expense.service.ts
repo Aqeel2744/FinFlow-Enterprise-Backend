@@ -242,6 +242,7 @@ export class ExpenseService {
     return expense;
   }
 
+ 
   static async updateExpense(
     organizationId: string,
     userId: string,
@@ -267,48 +268,81 @@ export class ExpenseService {
 
     // Role Guard
     if (role === Role.AUDITOR) {
-      throw new ForbiddenError('Auditors have read-only access and cannot modify expenses.');
+      throw new ForbiddenError(
+        'Auditors have read-only access and cannot modify expenses.'
+      );
     }
 
-    const isManagerOrOwner = 
-    [Role.PLATFORM_ADMIN, 
-      Role.ORG_OWNER,
-       Role.OWNER, Role.FINANCE_MANAGER].includes(role);
+    const isManagerOrOwner =
+      role === Role.PLATFORM_ADMIN ||
+      role === Role.ORG_OWNER ||
+      role === Role.OWNER ||
+      role === Role.FINANCE_MANAGER;
 
     if (!isManagerOrOwner && existing.submittedByUserId !== userId) {
-      throw new ForbiddenError('You are not authorized to modify another employee\'s expense claim.');
+      throw new ForbiddenError(
+        'You are not authorized to modify another employee\'s expense claim.'
+      );
     }
 
     // Status Guard
-    if (existing.status === ExpenseStatus.PAID || existing.status === ExpenseStatus.REIMBURSED) {
-      throw new UnprocessableEntityError('Cannot modify an expense that has already been reimbursed or paid.');
+    if (
+      existing.status === ExpenseStatus.PAID ||
+      existing.status === ExpenseStatus.REIMBURSED
+    ) {
+      throw new UnprocessableEntityError(
+        'Cannot modify an expense that has already been reimbursed or paid.'
+      );
     }
 
     if (!isManagerOrOwner && existing.status === ExpenseStatus.APPROVED) {
-      throw new UnprocessableEntityError('Approved expenses cannot be altered by employees. Contact your Finance Manager.');
+      throw new UnprocessableEntityError(
+        'Approved expenses cannot be altered by employees. Contact your Finance Manager.'
+      );
     }
 
     let amountCents = existing.amountCents;
+
     if (data.amount !== undefined) {
       amountCents = dollarsToCents(data.amount);
+
       if (amountCents <= BigInt(0)) {
         throw new BadRequestError('Expense amount must be greater than zero');
       }
     }
 
-    // If an employee updates a claim that was requested changes, return it to SUBMITTED
+    // If an employee updates a claim that was requested changes,
+    // return it to SUBMITTED.
     let newStatus = existing.status;
-    if (existing.status === ExpenseStatus.NEEDS_CHANGES || existing.status === ExpenseStatus.REJECTED) {
+
+    if (
+      existing.status === ExpenseStatus.NEEDS_CHANGES ||
+      existing.status === ExpenseStatus.REJECTED
+    ) {
       newStatus = ExpenseStatus.SUBMITTED;
     }
-    if (isManagerOrOwner && data.status) {
+
+    if (isManagerOrOwner && data.status !== undefined) {
+      // Payment settlement must be handled through the payment workflow.
+      if (
+        data.status === ExpenseStatus.PAID ||
+        data.status === ExpenseStatus.REIMBURSED
+      ) {
+        throw new UnprocessableEntityError(
+          'PAID and REIMBURSED statuses must be handled through the payment workflow.'
+        );
+      }
+
       newStatus = data.status;
     }
 
     const updated = await prisma.expense.update({
       where: { id: expenseId },
       data: {
-        description: data.description !== undefined ? data.description.trim() : undefined,
+        description:
+          data.description !== undefined
+            ? data.description.trim()
+            : undefined,
         amountCents,
         category: data.category !== undefined ? data.category : undefined,
         department: data.department !== undefined ? data.department : undefined,
@@ -317,7 +351,9 @@ export class ExpenseService {
         status: newStatus,
       },
       include: {
-        submittedByUser: { select: { id: true, firstName: true, lastName: true } },
+        submittedByUser: {
+          select: { id: true, firstName: true, lastName: true },
+        },
         vendor: true,
       },
     });
@@ -350,17 +386,31 @@ export class ExpenseService {
     }
 
     if (role === Role.AUDITOR) {
-      throw new ForbiddenError('Auditors have read-only access and cannot delete expenses.');
+      throw new ForbiddenError(
+        'Auditors have read-only access and cannot delete expenses.'
+      );
     }
 
-    const isManagerOrOwner = [Role.PLATFORM_ADMIN, Role.ORG_OWNER, Role.OWNER, Role.FINANCE_MANAGER].includes(role);
+    const isManagerOrOwner =
+      role === Role.PLATFORM_ADMIN ||
+      role === Role.ORG_OWNER ||
+      role === Role.OWNER ||
+      role === Role.FINANCE_MANAGER;
 
     if (!isManagerOrOwner && existing.submittedByUserId !== userId) {
-      throw new ForbiddenError('You cannot delete another employee\'s expense claim.');
+      throw new ForbiddenError(
+        'You cannot delete another employee\'s expense claim.'
+      );
     }
 
-    if (existing.status === ExpenseStatus.APPROVED || existing.status === ExpenseStatus.PAID || existing.status === ExpenseStatus.REIMBURSED) {
-      throw new UnprocessableEntityError('Approved or settled expenses cannot be deleted to maintain compliance audit trails.');
+    if (
+      existing.status === ExpenseStatus.APPROVED ||
+      existing.status === ExpenseStatus.PAID ||
+      existing.status === ExpenseStatus.REIMBURSED
+    ) {
+      throw new UnprocessableEntityError(
+        'Approved or settled expenses cannot be deleted to maintain compliance audit trails.'
+      );
     }
 
     await prisma.$transaction([
@@ -379,4 +429,5 @@ export class ExpenseService {
 
     return { message: 'Expense claim deleted successfully' };
   }
+
 }
