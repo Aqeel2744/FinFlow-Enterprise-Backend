@@ -1,0 +1,385 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Role {
+  PLATFORM_ADMIN
+  ORG_OWNER
+  OWNER
+  FINANCE_MANAGER
+  ACCOUNTANT
+  EMPLOYEE
+  AUDITOR
+}
+
+enum MembershipStatus {
+  ACTIVE
+  INVITED
+  SUSPENDED
+}
+
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  PARTIALLY_PAID
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+enum PaymentMethod {
+  BANK_TRANSFER
+  CASH
+  CHEQUE
+  CREDIT_CARD
+  CARD
+  OTHER
+}
+
+enum ExpenseStatus {
+  DRAFT
+  SUBMITTED
+  APPROVED
+  REJECTED
+  NEEDS_CHANGES
+  PAID
+  REIMBURSED
+}
+
+enum ApprovalActionType {
+  APPROVED
+  REJECTED
+  CHANGES_REQUESTED
+}
+
+model User {
+  id              String         @id @default(uuid())
+  email           String         @unique
+  passwordHash    String
+  firstName       String
+  lastName        String
+  isVerified      Boolean        @default(false)
+  verificationToken String?
+  resetToken      String?
+  resetTokenExpires DateTime?
+  mfaEnabled      Boolean        @default(false)
+  mfaSecret       String?
+  avatarUrl       String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  memberships     Membership[]
+  invoicesCreated Invoice[]      @relation("InvoiceCreator")
+  paymentsRecorded Payment[]     @relation("PaymentRecorder")
+  expensesSubmitted Expense[]    @relation("ExpenseSubmitter")
+  approvalsHandled ApprovalAction[]
+  auditLogs       AuditLog[]
+  notifications   Notification[]
+
+  @@map("users")
+}
+
+model Organization {
+  id              String         @id @default(uuid())
+  name            String
+  slug            String         @unique
+  currency        String         @default("USD")
+  timezone        String         @default("UTC")
+  taxId           String?
+  logoUrl         String?
+  address         String?
+  phone           String?
+  fiscalYearStart Int            @default(1) // month 1-12
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  memberships     Membership[]
+  customers       Customer[]
+  vendors         Vendor[]
+  invoices        Invoice[]
+  invoiceItems    InvoiceItem[]
+  payments        Payment[]
+  expenses        Expense[]
+  approvalPolicies ApprovalPolicy[]
+  approvalActions ApprovalAction[]
+  idempotencyRecords IdempotencyRecord[]
+  auditLogs       AuditLog[]
+  notifications   Notification[]
+
+  @@map("organizations")
+}
+
+model Membership {
+  id              String            @id @default(uuid())
+  userId          String
+  organizationId  String
+  role            Role              @default(EMPLOYEE)
+  status          MembershipStatus  @default(ACTIVE)
+  inviteToken     String?           @unique
+  invitedEmail    String?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization    Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, organizationId])
+  @@index([organizationId, role])
+  @@map("memberships")
+}
+
+model Customer {
+  id              String         @id @default(uuid())
+  organizationId  String
+  name            String
+  email           String
+  phone           String?
+  taxNumber       String?
+  billingAddress  String?
+  paymentTermsDays Int           @default(30)
+  isArchived      Boolean        @default(false)
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  organization    Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  invoices        Invoice[]
+  payments        Payment[]
+
+  @@unique([organizationId, email])
+  @@index([organizationId, isArchived])
+  @@map("customers")
+}
+
+model Vendor {
+  id              String         @id @default(uuid())
+  organizationId  String
+  name            String
+  email           String?
+  phone           String?
+  taxNumber       String?
+  billingAddress  String?
+  category        String?
+  isArchived      Boolean        @default(false)
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  organization    Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  expenses        Expense[]
+
+  @@index([organizationId, isArchived])
+  @@map("vendors")
+}
+
+model Invoice {
+  id              String         @id @default(uuid())
+  organizationId  String
+  customerId      String
+  invoiceNumber   String
+  status          InvoiceStatus  @default(DRAFT)
+  currency        String         @default("USD")
+  
+  // Stored in Integer Minor Units (Cents) to guarantee 100% exact math
+  subtotalCents   BigInt         @default(0)
+  taxCents        BigInt         @default(0)
+  discountCents   BigInt         @default(0)
+  totalCents      BigInt         @default(0)
+  paidCents       BigInt         @default(0)
+  balanceCents    BigInt         @default(0)
+
+  issueDate       DateTime       @default(now())
+  dueDate         DateTime
+  notes           String?
+  terms           String?
+  pdfUrl          String?
+  version         Int            @default(1) // Optimistic concurrency control
+  createdByUserId String
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  organization    Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  customer        Customer       @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  createdByUser   User           @relation("InvoiceCreator", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  items           InvoiceItem[]
+  payments        Payment[]
+
+  @@unique([organizationId, invoiceNumber])
+  @@index([organizationId, status])
+  @@index([organizationId, customerId])
+  @@index([organizationId, dueDate])
+  @@map("invoices")
+}
+
+model InvoiceItem {
+  id              String         @id @default(uuid())
+  organizationId  String
+  invoiceId       String
+  description     String
+  quantity        Int            @default(1)
+  unitPriceCents  BigInt         @default(0)
+  taxPercent      Decimal        @default(0.0) @db.Decimal(5, 2)
+  discountPercent Decimal        @default(0.0) @db.Decimal(5, 2)
+  totalCents      BigInt         @default(0)
+  createdAt       DateTime       @default(now())
+
+  organization    Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  invoice         Invoice        @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId])
+  @@index([organizationId])
+  @@map("invoice_items")
+}
+
+model Payment {
+  id              String         @id @default(uuid())
+  organizationId  String
+  invoiceId       String
+  customerId      String
+  amountCents     BigInt
+  currency        String         @default("USD")
+  paymentDate     DateTime       @default(now())
+  paymentMethod   PaymentMethod  @default(BANK_TRANSFER)
+  referenceNumber String?
+  notes           String?
+  recordedByUserId String
+  idempotencyKeyId String?
+
+  createdAt       DateTime       @default(now())
+
+  organization    Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  invoice         Invoice        @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+  customer        Customer       @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  recordedByUser  User           @relation("PaymentRecorder", fields: [recordedByUserId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId, paymentDate])
+  @@index([organizationId, invoiceId])
+  @@index([organizationId, customerId])
+  @@map("payments")
+}
+
+model Expense {
+  id              String         @id @default(uuid())
+  organizationId  String
+  submittedByUserId String
+  vendorId        String?
+  category        String         // Travel, Office Supplies, Software, Meals, etc.
+  department      String?        // Engineering, Sales, Marketing, Executive, etc.
+  project         String?
+  amountCents     BigInt
+  currency        String         @default("USD")
+  expenseDate     DateTime       @default(now())
+  description     String
+  receiptUrl      String?
+  receiptPublicId String?
+  status          ExpenseStatus  @default(DRAFT)
+  aiFlagged       Boolean        @default(false)
+  aiFlagReason    String?
+  aiSuggestedCategory String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  organization    Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  submittedByUser User           @relation("ExpenseSubmitter", fields: [submittedByUserId], references: [id], onDelete: Restrict)
+  vendor          Vendor?        @relation(fields: [vendorId], references: [id], onDelete: SetNull)
+  approvalActions ApprovalAction[]
+
+  @@index([organizationId, status])
+  @@index([organizationId, submittedByUserId])
+  @@index([organizationId, expenseDate])
+  @@map("expenses")
+}
+
+model ApprovalPolicy {
+  id                  String       @id @default(uuid())
+  organizationId      String
+  name                String       @default("Default Policy")
+  minAmountCents      BigInt       @default(0)
+  maxAmountCents      BigInt?      // Null = no upper limit
+  requiredRole        Role         @default(FINANCE_MANAGER)
+  autoApproveBelowCents BigInt     @default(0)
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+
+  organization        Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@map("approval_policies")
+}
+
+model ApprovalAction {
+  id              String             @id @default(uuid())
+  organizationId  String
+  expenseId       String
+  approverUserId  String
+  action          ApprovalActionType
+  comments        String?
+  createdAt       DateTime           @default(now())
+
+  organization    Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  expense         Expense            @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  approverUser    User               @relation(fields: [approverUserId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId, expenseId])
+  @@map("approval_actions")
+}
+
+model IdempotencyRecord {
+  id                String       @id @default(uuid())
+  organizationId    String
+  key               String
+  endpoint          String
+  requestFingerprint String
+  responseStatusCode Int
+  responseBody      Json
+  createdAt         DateTime     @default(now())
+  expiresAt         DateTime
+
+  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, key])
+  @@index([expiresAt])
+  @@map("idempotency_records")
+}
+
+model AuditLog {
+  id              String       @id @default(uuid())
+  organizationId  String
+  userId          String?
+  action          String       // e.g. INVOICE_CREATED, PAYMENT_RECORDED, EXPENSE_APPROVED
+  entityType      String       // Invoice, Payment, Expense, Customer, etc.
+  entityId        String
+  oldState        Json?
+  newState        Json?
+  ipAddress       String?
+  userAgent       String?
+  createdAt       DateTime     @default(now())
+
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user            User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([organizationId, entityType, entityId])
+  @@map("audit_logs")
+}
+
+model Notification {
+  id              String       @id @default(uuid())
+  organizationId  String
+  userId          String
+  title           String
+  message         String
+  type            String       @default("INFO") // INFO, SUCCESS, WARNING, ALERT
+  link            String?
+  isRead          Boolean      @default(false)
+  createdAt       DateTime     @default(now())
+
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user            User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, userId, isRead])
+  @@map("notifications")
+}
